@@ -15,6 +15,9 @@ The installer configures a local service that monitors the iLO thermal endpoint,
 
 The service is engineered to **fail-safe**. Escalation to maximum cooling occurs instantly, while de-escalation back to quieter modes utilizes hysteresis to prevent rapid fan speed oscillation (fan flapping).
 
+
+
+
 ## **Problem Statement**
 
 On certain HPE platforms—particularly those running unsupported operating systems or non-standard hardware configurations—system fans may operate at unnecessarily aggressive speeds despite healthy system thermals. This project offers a host-side mitigation strategy via Redfish, removing any operational dependency on the AMSD daemon.
@@ -150,3 +153,21 @@ The core script supports manual execution via the following flags:
 ## **License**
 
 This project is open-source. Insert your preferred licensing terms here (e.g., MIT, GPLv3).
+
+
+### **Screenshot**
+
+
+
+<img width="755" height="462" alt="Setup" src="https://github.com/user-attachments/assets/55449ffa-6f17-4926-b116-f11352a00f65" />
+<img width="755" height="403" alt="Setup2" src="https://github.com/user-attachments/assets/7f4cd0fa-5c69-480f-b749-ac8eaebd48ef" />
+<img width="755" height="402" alt="Setup3" src="https://github.com/user-attachments/assets/955f9235-8923-4b9e-916e-abe5373f9c8e" />
+<img width="755" height="522" alt="Setup4" src="https://github.com/user-attachments/assets/b69213b7-81a8-4d50-8788-ce7e5ee37f41" />
+<img width="755" height="478" alt="Setup5" src="https://github.com/user-attachments/assets/e90dd1a6-ecd4-4cfe-a7bc-4abafd313f46" />
+<img width="755" height="581" alt="Setup6" src="https://github.com/user-attachments/assets/7690fc98-4d30-4435-8fa1-e28eed6b1997" />
+<img width="755" height="530" alt="Setup7" src="https://github.com/user-attachments/assets/971aafa5-ebf3-47a9-875c-a5172b330dbc" />
+
+
+
+
+
