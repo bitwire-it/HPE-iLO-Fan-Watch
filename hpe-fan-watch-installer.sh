@@ -118,6 +118,13 @@ wt() {
 say_box()   { wt --msgbox "$1" "${2:-12}" "${3:-72}" || :; }
 ask_yesno() { wt --yesno "$1" "${2:-12}" "${3:-72}"; }
 
+# Terminal rows/cols (clamped to safe defaults if tput unavailable)
+TERM_ROWS="$(tput lines 2>/dev/null || echo 24)"
+TERM_COLS="$(tput cols  2>/dev/null || echo 80)"
+# Safe dialog height = terminal rows minus whiptail chrome (4 rows)
+dlg_h() { local h="${1}" max=$(( TERM_ROWS - 4 )); echo $(( h < max ? h : max )); }
+dlg_w() { local w="${1}" max=$(( TERM_COLS - 2 )); echo $(( w < max ? w : max )); }
+
 # Run a critical command; on failure surface a visible warning. Returns the
 # command's exit status so callers can decide whether to continue or abort.
 run_critical() {
@@ -848,10 +855,11 @@ step_sensors() {
   fi
 
   local out
+  local _sh _sl; _sh="$(dlg_h 20)"; _sl=$(( _sh - 8 ))
   out="$(wt --separate-output --checklist \
 "These are the sensors the iLO reports right now, with current readings.
 Tick the ones to watch. Pre-ticked = recommended set.
-SPACE toggles, TAB moves to OK." 22 78 12 "${CK[@]}")" || abort
+SPACE toggles, TAB moves to OK." "${_sh}" "$(dlg_w 78)" "${_sl}" "${CK[@]}")" || abort
 
   WATCH=()
   while IFS= read -r nm; do [[ -n "${nm}" ]] && WATCH+=( "${nm}" ); done <<< "${out}"
@@ -872,7 +880,7 @@ step_thresholds() {
 
 ${list}
 At a warning the fans stop quieting; at a critical they go to full firmware
-cooling. Use these suggested values?" 23 78; then return 0; fi
+cooling. Use these suggested values?" "$(dlg_h 20)" "$(dlg_w 78)"; then return 0; fi
 
   local w c
   for n in "${WATCH[@]}"; do
@@ -987,7 +995,8 @@ step_summary() {
   for n in "${WATCH[@]}"; do sens+=" ${n} (warn ${WARN[$n]} / crit ${CRIT[$n]})"$'\n'; done
   local cred_desc="systemd encrypted credentials"
   [[ "${CRED_MODE}" == "envfile" ]] && cred_desc="root-only 0400 env file"
-  ask_yesno "Review before installing (v${VERSION}):
+  local summary
+  summary="Review before installing (v${VERSION}  commit ${COMMIT}):
 
 iLO host        : ${ILO_HOST}
 TLS             : verified against pinned ${CACERT_PATH}
@@ -999,8 +1008,9 @@ Fan bias        : quiet ${QUIET} / normal ${NORMAL} / safe ${SAFE}
 Options         : reassert=${REASSERT} revert=${REVERT} syslog=${USE_SYSLOG}
 
 Watched sensors :
-${sens}
-Proceed with installation and start the service now?" 27 80
+${sens}"
+  wt --scrolltext --msgbox "${summary}" "$(dlg_h 20)" "$(dlg_w 80)" || :
+  ask_yesno "Proceed with installation and start the service now?" 8 62
 }
 
 # --------------------------------------------------------------------------
@@ -1445,7 +1455,7 @@ Useful commands:
 
 Re-run this installer for the management menu (reconfigure / uninstall).
 
-Install log: ${SETUP_LOG}" 29 84 || :
+Install log: ${SETUP_LOG}" "$(dlg_h 26)" "$(dlg_w 84)" || :
 }
 
 # --------------------------------------------------------------------------
