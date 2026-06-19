@@ -363,11 +363,14 @@ create_or_update_account() {
 
   local body
   if [[ -n "${found}" ]]; then
-    body="$(jq -nc --arg p "${np}" \
-      '{Password:$p, Oem:{Hpe:{Privileges:{LoginPriv:true, iLOConfigPriv:true}}}}')"
+    # Only reset password — do NOT include Privileges in the PATCH body.
+    # iLO replaces the entire Privileges object rather than merging, so
+    # including it would strip any privileges not listed here (e.g. full
+    # admin rights if the user accidentally entered the admin account name).
+    body="$(jq -nc --arg p "${np}" '{Password:$p}')"
     _rf "${au}" "${ap}" PATCH "${found}" "${body}"
     [[ "${RF_CODE}" =~ ^2 ]] || return 3
-    ACCT_RESULT="updated existing account (password reset; Login + Configure ensured)"
+    ACCT_RESULT="updated existing account (password reset)"
   else
     body="$(jq -nc --arg u "${nu}" --arg p "${np}" \
       '{UserName:$u, Password:$p, Oem:{Hpe:{LoginName:$u, Privileges:{LoginPriv:true, iLOConfigPriv:true}}}}')"
@@ -638,8 +641,17 @@ Returning to the authentication menu." 11 70
 "Create service account - step 2 of 2: NEW account.
 
 Username for the new dedicated service account:" 12 68 "redfishuser")" || abort
-    [[ -n "${nu}" ]] && break
-    say_box "Username cannot be empty." 8 46
+    [[ -n "${nu}" ]] || { say_box "Username cannot be empty." 8 46; continue; }
+    [[ "${nu}" == "${au}" ]] && {
+      say_box "The service account name cannot be the same as the admin account ('${au}').
+
+Using the admin account as the service account would reset its password and
+strip its privileges to the minimal set, locking you out.
+
+Choose a different username (e.g. 'redfishuser')." 14 74
+      continue
+    }
+    break
   done
   while true; do
     np="$(wt  --passwordbox "Password for new account '${nu}' (min 8 characters):" 9 66)" || abort
