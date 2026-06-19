@@ -38,6 +38,7 @@
 set -euo pipefail
 
 VERSION="2.0.0"
+COMMIT="6336617"
 
 # --------------------------------------------------------------------------
 # Paths
@@ -583,8 +584,9 @@ iLO firmware control." 11 70; then _do_uninstall; fi ;;
 # --------------------------------------------------------------------------
 step_welcome() {
   say_box \
-"This installer sets up the HPE iLO fan-quieting service on THIS machine,
-driven by HPE's official Python Redfish tooling.
+"HPE iLO Fan-Watch Installer  v${VERSION}  (commit ${COMMIT})
+
+This installer sets up the HPE iLO fan-quieting service on THIS machine.
 
 It will:
  - pin the iLO TLS certificate (verified on every call - never insecure)
@@ -593,7 +595,7 @@ It will:
  - read the live temperature sensors and let you tune thresholds
  - install a watchdog-protected systemd service and start it
 
-A terminal of at least 80x24 is recommended." 20 76
+A terminal of at least 80x24 is recommended." 21 76
 }
 
 step_host() {
