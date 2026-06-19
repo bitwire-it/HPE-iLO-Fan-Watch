@@ -249,7 +249,7 @@ install_helper() {
 Reads connection details from the environment to keep secrets out of argv:
   ILO_HOST   (host or https://host)
   ILO_USER, ILO_PASS
-  ILO_CACERT (PEM file — full cert chain — used to VERIFY TLS)
+  ILO_CACERT (PEM file of the pinned iLO cert, used for fingerprint verification)
   ILO_DATA   (JSON body for PATCH/POST)
   ILO_TIMEOUT
 Usage: redfish_ctl.py <GET|PATCH|POST|DELETE> <path>
@@ -261,10 +261,22 @@ def emit(status, body, error):
     sys.stdout.write(json.dumps({"status": status, "body": body, "error": error}))
     sys.stdout.write("\n")
 
+def _cert_sha256(pem_path):
+    """SHA-256 fingerprint (hex) of the first cert in a PEM file."""
+    import ssl, hashlib, re
+    with open(pem_path) as f:
+        pem = f.read()
+    m = re.search(r'-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----', pem, re.DOTALL)
+    if not m:
+        raise ValueError("no certificate found in %s" % pem_path)
+    der = ssl.PEM_cert_to_DER_cert(m.group(0))
+    return hashlib.sha256(der).hexdigest()
+
 def main():
     try:
         import requests
         from requests.auth import HTTPBasicAuth
+        from requests.adapters import HTTPAdapter
     except Exception as e:
         emit(0, None, "requests library import failed: %s" % e)
         return 0
@@ -285,16 +297,36 @@ def main():
     url = base.rstrip("/") + path
 
     session = requests.Session()
-    # verify=path tells requests/urllib3 to use the pinned PEM as the CA bundle.
-    # This works correctly with full chains (leaf + intermediates) on all urllib3
-    # versions, unlike python-ilorest-library which breaks on urllib3 2.x.
-    session.verify = cacert if cacert else True
     session.auth = HTTPBasicAuth(user, pw)
     session.headers.update({
         "Content-Type": "application/json",
         "OData-Version": "4.0",
-        "X-Auth-Token": "",
     })
+
+    if cacert:
+        # Use fingerprint verification instead of CA chain verification.
+        # iLO certs are often self-signed with a broken AKI extension that
+        # causes "unable to get local issuer certificate" even when the cert
+        # itself is loaded as the CA. Fingerprint verification bypasses the
+        # CA chain entirely — urllib3 checks only that the server presents
+        # the exact cert we pinned, which is correct behaviour for cert pinning.
+        try:
+            fp = _cert_sha256(cacert)
+        except Exception as e:
+            emit(0, None, "failed to read pinned cert %s: %s" % (cacert, e))
+            return 0
+
+        class _FingerprintAdapter(HTTPAdapter):
+            def init_poolmanager(self, *args, **kw):
+                kw['assert_fingerprint'] = fp
+                super().init_poolmanager(*args, **kw)
+
+        session.mount('https://', _FingerprintAdapter())
+        session.verify = False  # CA check disabled; fingerprint adapter takes over
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    else:
+        session.verify = True
 
     try:
         raw = os.environ.get("ILO_DATA", "")
