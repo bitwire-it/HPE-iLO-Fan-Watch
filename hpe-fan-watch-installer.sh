@@ -613,27 +613,37 @@ Choose how to establish the trusted certificate for ${ILO_HOST}:" 15 78 2 \
       say_box "Could not read a valid PEM certificate at: ${p}" 8 64
     done
   else
-    local tmp; tmp="$(mktemp)"
-    if ! echo | openssl s_client -connect "${ILO_HOST}:443" -servername "${ILO_HOST}" 2>/dev/null \
-         | openssl x509 -outform PEM > "${tmp}" 2>/dev/null || ! [[ -s "${tmp}" ]]; then
-      rm -f "${tmp}"
+    local tmp tmp_leaf; tmp="$(mktemp)"; tmp_leaf="$(mktemp)"
+    # -showcerts fetches the full chain (leaf + intermediates); sed extracts all PEM blocks.
+    # Storing only the leaf cert breaks TLS verification when the iLO cert is signed
+    # by an intermediate CA — urllib3 cannot build the chain without it.
+    if ! echo | openssl s_client -connect "${ILO_HOST}:443" -servername "${ILO_HOST}" \
+         -showcerts 2>/dev/null \
+         | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' > "${tmp}" \
+         || ! [[ -s "${tmp}" ]]; then
+      rm -f "${tmp}" "${tmp_leaf}"
       say_box "Could not retrieve a TLS certificate from ${ILO_HOST}:443.
 Check connectivity, then re-run." 9 64
       abort
     fi
-    local fp subj issuer dates
-    fp="$(openssl x509 -in "${tmp}" -noout -fingerprint -sha256 | sed 's/.*=//')"
-    subj="$(openssl x509 -in "${tmp}" -noout -subject | sed 's/^subject= *//')"
-    issuer="$(openssl x509 -in "${tmp}" -noout -issuer | sed 's/^issuer= *//')"
-    dates="$(openssl x509 -in "${tmp}" -noout -dates | tr '\n' '  ')"
+    # Extract the leaf (first) cert for display only.
+    openssl x509 -outform PEM < "${tmp}" > "${tmp_leaf}" 2>/dev/null
+    local fp subj issuer dates chain_count
+    fp="$(openssl x509 -in "${tmp_leaf}" -noout -fingerprint -sha256 | sed 's/.*=//')"
+    subj="$(openssl x509 -in "${tmp_leaf}" -noout -subject | sed 's/^subject= *//')"
+    issuer="$(openssl x509 -in "${tmp_leaf}" -noout -issuer | sed 's/^issuer= *//')"
+    dates="$(openssl x509 -in "${tmp_leaf}" -noout -dates | tr '\n' '  ')"
+    chain_count="$(grep -c 'BEGIN CERTIFICATE' "${tmp}" || true)"
+    rm -f "${tmp_leaf}"
     if ask_yesno "Verify this iLO certificate and pin it as trusted:
 
 Subject     : ${subj}
 Issuer      : ${issuer}
 Validity    : ${dates}
 SHA-256 FP  : ${fp}
+Chain certs : ${chain_count}
 
-Confirm the fingerprint matches the iLO before trusting it. Pin this cert?" 18 80; then
+Confirm the fingerprint matches the iLO before trusting it. Pin this cert?" 20 80; then
       install -m 0644 "${tmp}" "${CACERT_PATH}"
       rm -f "${tmp}"
     else
