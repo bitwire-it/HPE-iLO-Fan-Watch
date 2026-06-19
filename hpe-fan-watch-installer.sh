@@ -216,9 +216,17 @@ ensure_root_and_tools() {
 }
 
 # Install HPE's official Python Redfish library (module: redfish).
+# Check for redfish.redfish_client specifically — the generic 'redfish' PyPI
+# package also provides `import redfish` but lacks redfish_client entirely.
 ensure_redfish_library() {
-  if python3 -c 'import redfish' >/dev/null 2>&1; then return 0; fi
+  if python3 -c 'import redfish; redfish.redfish_client' >/dev/null 2>&1; then return 0; fi
   echo "Installing HPE official python-ilorest-library (Redfish) ..." >&2
+  # Uninstall the generic 'redfish' PyPI package first if present — it shadows
+  # python-ilorest-library but lacks redfish_client, causing a confusing error.
+  if python3 -c 'import redfish' >/dev/null 2>&1; then
+    pip3 uninstall --yes redfish >/dev/null 2>&1 || \
+      pip3 uninstall --yes --break-system-packages redfish >/dev/null 2>&1 || true
+  fi
   if pip3 install --quiet python-ilorest-library >/dev/null 2>&1; then :
   elif pip3 install --quiet --break-system-packages python-ilorest-library >/dev/null 2>&1; then :
   else
@@ -226,8 +234,8 @@ ensure_redfish_library() {
     echo "Install it manually (pip3 install python-ilorest-library) and re-run." >&2
     exit 3
   fi
-  python3 -c 'import redfish' >/dev/null 2>&1 || {
-    echo "ERROR: 'redfish' module still not importable after install." >&2; exit 3; }
+  python3 -c 'import redfish; redfish.redfish_client' >/dev/null 2>&1 || {
+    echo "ERROR: python-ilorest-library installed but redfish.redfish_client not found." >&2; exit 3; }
 }
 
 # --------------------------------------------------------------------------
