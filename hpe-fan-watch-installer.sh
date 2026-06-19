@@ -2,19 +2,17 @@
 #
 # hpe-fan-watch-installer.sh
 # Interactive (whiptail) installer for the HPE iLO fan-quieting service.
-# Targets HPE ProLiant Gen10/Gen11 via the iLO Redfish API, using HPE's
-# OFFICIAL Python Redfish tooling (python-ilorest-library, the same engine
-# the `ilorest` RESTful Interface Tool is built on) as the control plane.
+# Targets HPE ProLiant Gen10/Gen11 via the iLO Redfish API. All iLO I/O
+# goes through an embedded Python helper using the `requests` library.
 #
 # ============================================================================
 #  WHAT CHANGED (rewrite, v2.0.0)
 # ============================================================================
-#  1. Control plane is now HPE's official Redfish tooling. All iLO I/O goes
-#     through an embedded Python helper backed by `python-ilorest-library`
-#     (module `redfish`). No raw curl-to-Redfish, no firmware hacks, no AMSD.
-#  2. TLS is ALWAYS verified. `--insecure` is gone. The iLO certificate is
-#     fetched and pinned during install (or a trusted CA path is supplied);
-#     every call verifies against it via the library's `ca_cert_data`.
+#  1. Control plane is a thin Python helper (requests over Redfish REST).
+#     No raw curl-to-Redfish, no firmware hacks, no AMSD.
+#  2. TLS is ALWAYS verified. `--insecure` is gone. The iLO certificate chain
+#     is fetched and pinned during install (or a trusted CA path is supplied);
+#     every call verifies against it via requests' `verify=` parameter.
 #  3. Credentials are never stored in cleartext config. They go to encrypted
 #     systemd credentials (`systemd-creds encrypt`, systemd >= 250) when
 #     available, otherwise a root-only 0400 environment file with a warning.
@@ -219,43 +217,39 @@ ensure_root_and_tools() {
   install_helper
 }
 
-# Install HPE's official Python Redfish library (module: redfish).
-# Check for redfish.RedfishClient specifically — the generic 'redfish' PyPI
-# package also provides `import redfish` but lacks RedfishClient entirely.
+# Ensure the 'requests' Python library is available.
+# We use requests directly rather than python-ilorest-library because the
+# library's TLS handling is broken on urllib3 2.x (ca_certs not wired to the
+# PoolManager correctly), causing cert verification errors even with a valid
+# pinned cert. requests.Session(verify=path) works correctly on all versions.
 ensure_redfish_library() {
-  if python3 -c 'import redfish; redfish.RedfishClient' >/dev/null 2>&1; then return 0; fi
-  echo "Installing HPE official python-ilorest-library (Redfish) ..." >&2
-  # Uninstall the generic 'redfish' PyPI package first if present — it shadows
-  # python-ilorest-library but lacks RedfishClient, causing a confusing error.
-  if python3 -c 'import redfish' >/dev/null 2>&1; then
-    pip3 uninstall --yes redfish >/dev/null 2>&1 || \
-      pip3 uninstall --yes --break-system-packages redfish >/dev/null 2>&1 || true
-  fi
-  if pip3 install --quiet python-ilorest-library >/dev/null 2>&1; then :
-  elif pip3 install --quiet --break-system-packages python-ilorest-library >/dev/null 2>&1; then :
+  if python3 -c 'import requests' >/dev/null 2>&1; then return 0; fi
+  echo "Installing python3-requests ..." >&2
+  if pip3 install --quiet requests >/dev/null 2>&1; then :
+  elif pip3 install --quiet --break-system-packages requests >/dev/null 2>&1; then :
   else
-    echo "ERROR: could not install python-ilorest-library via pip3." >&2
-    echo "Install it manually (pip3 install python-ilorest-library) and re-run." >&2
+    echo "ERROR: could not install requests via pip3." >&2
+    echo "Install it manually (apt install python3-requests) and re-run." >&2
     exit 3
   fi
-  python3 -c 'import redfish; redfish.RedfishClient' >/dev/null 2>&1 || {
-    echo "ERROR: python-ilorest-library installed but redfish.RedfishClient not found." >&2; exit 3; }
+  python3 -c 'import requests' >/dev/null 2>&1 || {
+    echo "ERROR: requests still not importable after install." >&2; exit 3; }
 }
 
 # --------------------------------------------------------------------------
-# Embedded Python control plane (official HPE redfish library)
+# Embedded Python control plane (requests over Redfish REST API)
 # --------------------------------------------------------------------------
 install_helper() {
   install -d -m 0755 "${LIB_DIR}"
   local tmp; tmp="$(mktemp)"
   cat > "${tmp}" <<'PYEOF'
 #!/usr/bin/env python3
-"""Thin Redfish control plane built on HPE's official python-ilorest-library.
+"""Thin Redfish control plane using the requests library.
 
 Reads connection details from the environment to keep secrets out of argv:
   ILO_HOST   (host or https://host)
   ILO_USER, ILO_PASS
-  ILO_CACERT (PEM file used to VERIFY TLS; required)
+  ILO_CACERT (PEM file — full cert chain — used to VERIFY TLS)
   ILO_DATA   (JSON body for PATCH/POST)
   ILO_TIMEOUT
 Usage: redfish_ctl.py <GET|PATCH|POST|DELETE> <path>
@@ -269,9 +263,10 @@ def emit(status, body, error):
 
 def main():
     try:
-        import redfish
-    except Exception as e:  # library missing
-        emit(0, None, "redfish library import failed: %s" % e)
+        import requests
+        from requests.auth import HTTPBasicAuth
+    except Exception as e:
+        emit(0, None, "requests library import failed: %s" % e)
         return 0
     if len(sys.argv) < 3:
         emit(0, None, "usage: METHOD PATH")
@@ -287,51 +282,43 @@ def main():
     except ValueError:
         timeout = 20
     base = host if host.startswith("https://") else "https://" + host
+    url = base.rstrip("/") + path
 
-    client = None
-    try:
-        # ca_cert_data != None => TLS certificate is verified (never insecure).
-        # python-ilorest-library v7+ uses RedfishClient; redfish_client removed.
-        ca_cert_data = {"ca_certs": cacert} if cacert else None
-        client = redfish.RedfishClient(base_url=base, username=user,
-                                       password=pw, ca_cert_data=ca_cert_data,
-                                       timeout=timeout)
-        client.login()
-    except Exception as e:
-        import traceback
-        sys.stderr.write(traceback.format_exc())
-        emit(0, None, "login failed: %s" % e)
-        if client is not None:
-            try: client.logout()
-            except Exception: pass
-        return 0
+    session = requests.Session()
+    # verify=path tells requests/urllib3 to use the pinned PEM as the CA bundle.
+    # This works correctly with full chains (leaf + intermediates) on all urllib3
+    # versions, unlike python-ilorest-library which breaks on urllib3 2.x.
+    session.verify = cacert if cacert else True
+    session.auth = HTTPBasicAuth(user, pw)
+    session.headers.update({
+        "Content-Type": "application/json",
+        "OData-Version": "4.0",
+        "X-Auth-Token": "",
+    })
 
     try:
         raw = os.environ.get("ILO_DATA", "")
         body = json.loads(raw) if raw else None
         if method == "GET":
-            r = client.get(path)
+            r = session.get(url, timeout=timeout)
         elif method == "PATCH":
-            r = client.patch(path, body=body)
+            r = session.patch(url, json=body, timeout=timeout)
         elif method == "POST":
-            r = client.post(path, body=body)
+            r = session.post(url, json=body, timeout=timeout)
         elif method == "DELETE":
-            r = client.delete(path)
+            r = session.delete(url, timeout=timeout)
         else:
             emit(0, None, "unsupported method: %s" % method)
             return 0
         try:
-            parsed = r.dict
+            body_out = r.json()
         except Exception:
-            parsed = None
-        emit(int(getattr(r, "status", 0)), parsed, None)
+            body_out = None
+        emit(r.status_code, body_out, None)
     except Exception as e:
         import traceback
         sys.stderr.write(traceback.format_exc())
         emit(0, None, str(e))
-    finally:
-        try: client.logout()
-        except Exception: pass
     return 0
 
 if __name__ == "__main__":
