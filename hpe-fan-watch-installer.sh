@@ -89,6 +89,10 @@ RF_CODE=0
 RF_BODY="null"
 RF_ERR=""
 
+# Setup log — written during install/configure; shown on error
+SETUP_LOG="${TMPDIR:-/tmp}/hpe-fan-watch-install-$$.log"
+log_setup() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*" >> "${SETUP_LOG}"; }
+
 declare -a WATCH=()
 declare -A WARN=()
 declare -A CRIT=()
@@ -294,6 +298,8 @@ def main():
                                        timeout=timeout)
         client.login()
     except Exception as e:
+        import traceback
+        sys.stderr.write(traceback.format_exc())
         emit(0, None, "login failed: %s" % e)
         if client is not None:
             try: client.logout()
@@ -320,6 +326,8 @@ def main():
             parsed = None
         emit(int(getattr(r, "status", 0)), parsed, None)
     except Exception as e:
+        import traceback
+        sys.stderr.write(traceback.format_exc())
         emit(0, None, str(e))
     finally:
         try: client.logout()
@@ -339,15 +347,22 @@ PYEOF
 # _rf USER PASS METHOD PATH [JSON_DATA]
 _rf() {
   local u="$1" p="$2" m="$3" path="$4" data="${5:-}"
-  local out
+  local out _rf_err _rf_tmp
+  _rf_tmp="$(mktemp)"
   out="$(ILO_HOST="${ILO_HOST}" ILO_USER="${u}" ILO_PASS="${p}" \
          ILO_CACERT="${CACERT_PATH}" ILO_DATA="${data}" \
-         python3 "${HELPER_PATH}" "${m}" "${path}" 2>/dev/null || true)"
-  if [[ -z "${out}" ]]; then RF_CODE=0; RF_BODY="null"; RF_ERR="no response"; return 0; fi
+         python3 "${HELPER_PATH}" "${m}" "${path}" 2>"${_rf_tmp}" || true)"
+  _rf_err="$(cat "${_rf_tmp}"; rm -f "${_rf_tmp}")"
+  if [[ -z "${out}" ]]; then
+    RF_CODE=0; RF_BODY="null"; RF_ERR="no response"
+    log_setup "RF ${m} ${path} (user=${u}) → no output${_rf_err:+$'\n'  stderr: ${_rf_err}}"
+    return 0
+  fi
   RF_CODE="$(jq -r '.status // 0' <<<"${out}" 2>/dev/null || echo 0)"
   RF_BODY="$(jq -c '.body'        <<<"${out}" 2>/dev/null || echo null)"
   RF_ERR="$(jq  -r '.error // ""' <<<"${out}" 2>/dev/null || echo '')"
   [[ "${RF_CODE}" =~ ^[0-9]+$ ]] || RF_CODE=0
+  log_setup "RF ${m} ${path} (user=${u}) → HTTP ${RF_CODE}${RF_ERR:+ | ${RF_ERR}}${_rf_err:+$'\n'  stderr: ${_rf_err}}"
   return 0
 }
 # rf METHOD PATH [DATA] — uses the service account credentials.
@@ -358,8 +373,9 @@ rf() { _rf "${SVC_USER}" "${SVC_PASS}" "$@"; }
 # --------------------------------------------------------------------------
 create_or_update_account() {
   local au="$1" ap="$2" nu="$3" np="$4"
+  log_setup "create_or_update_account: target user=${nu}"
   _rf "${au}" "${ap}" GET "/redfish/v1/AccountService/Accounts/"
-  [[ "${RF_CODE}" =~ ^2 ]] || return 2
+  [[ "${RF_CODE}" =~ ^2 ]] || { log_setup "ERROR: list accounts failed HTTP ${RF_CODE} ${RF_ERR}"; return 2; }
 
   local members uri found="" uname
   members="$(jq -r '.Members[]?."@odata.id" // empty' <<<"${RF_BODY}")"
@@ -379,13 +395,13 @@ create_or_update_account() {
     # admin rights if the user accidentally entered the admin account name).
     body="$(jq -nc --arg p "${np}" '{Password:$p}')"
     _rf "${au}" "${ap}" PATCH "${found}" "${body}"
-    [[ "${RF_CODE}" =~ ^2 ]] || return 3
+    [[ "${RF_CODE}" =~ ^2 ]] || { log_setup "ERROR: PATCH ${found} failed HTTP ${RF_CODE} ${RF_ERR}"; return 3; }
     ACCT_RESULT="updated existing account (password reset)"
   else
     body="$(jq -nc --arg u "${nu}" --arg p "${np}" \
       '{UserName:$u, Password:$p, Oem:{Hpe:{LoginName:$u, Privileges:{LoginPriv:true, iLOConfigPriv:true}}}}')"
     _rf "${au}" "${ap}" POST "/redfish/v1/AccountService/Accounts/" "${body}"
-    [[ "${RF_CODE}" =~ ^2 ]] || return 4
+    [[ "${RF_CODE}" =~ ^2 ]] || { log_setup "ERROR: POST accounts failed HTTP ${RF_CODE} ${RF_ERR}"; return 4; }
     # Resolve the new account URI so an abort can delete it.
     _rf "${au}" "${ap}" GET "/redfish/v1/AccountService/Accounts/"
     if [[ "${RF_CODE}" =~ ^2 ]]; then
@@ -573,6 +589,7 @@ The service talks to: https://<host>/redfish/v1/Chassis/1/Thermal/"
     ILO_HOST="$(wt --inputbox "${desc}" 13 74 "")" || abort
     ILO_HOST="${ILO_HOST#https://}"; ILO_HOST="${ILO_HOST%/}"
   done
+  log_setup "iLO host: ${ILO_HOST}"
 }
 
 step_certpin() {
@@ -638,9 +655,12 @@ the service account and is NOT stored." 13 76 "Administrator")" || abort
   if [[ ! "${RF_CODE}" =~ ^2 ]]; then
     local m="Admin login failed (HTTP ${RF_CODE})."
     [[ "${RF_CODE}" == "0" ]] && m="Could not reach the iLO at ${ILO_HOST}. ${RF_ERR}"
+    log_setup "admin login failed: user=${au} host=${ILO_HOST} HTTP=${RF_CODE} err=${RF_ERR}"
     say_box "${m}
 
-Returning to the authentication menu." 11 70
+Returning to the authentication menu.
+
+Full details: ${SETUP_LOG}" 13 70
     return 1
   fi
   # Hold admin creds in memory so an abort can clean up an orphaned account.
@@ -675,13 +695,16 @@ Choose a different username (e.g. 'redfishuser')." 14 74
   create_or_update_account "${au}" "${ap}" "${nu}" "${np}" || rc=$?
   if (( rc != 0 )); then
     local detail; detail="$(jq -r '[.. | .MessageId? // empty] | first // empty' <<<"${RF_BODY}" 2>/dev/null || true)"
+    log_setup "account_create_flow failed: code=${rc} HTTP=${RF_CODE} err=${RF_ERR} detail=${detail}"
     say_box \
 "Could not create/update the account (code ${rc}).
 
 iLO response: ${detail:-HTTP ${RF_CODE} ${RF_ERR}}
 
 Common causes: admin lacks 'Administer User Accounts', the password fails the
-iLO policy, or the account limit is reached. Returning to the auth menu." 16 76
+iLO policy, or the account limit is reached. Returning to the auth menu.
+
+Full details: ${SETUP_LOG}" 18 76
     return 1
   fi
   SVC_USER="${nu}"; SVC_PASS="${np}"
@@ -720,9 +743,12 @@ Settings (least privilege)." 16 78 2 \
       0)       why="Could not reach/verify the iLO at ${ILO_HOST}. ${RF_ERR}" ;;
       *)       why="Unexpected response from the iLO (HTTP ${RF_CODE}). ${RF_ERR}" ;;
     esac
+    log_setup "service account verify failed: user=${SVC_USER} host=${ILO_HOST} HTTP=${RF_CODE} err=${RF_ERR}"
     ask_yesno "${why}
 
-Try again (re-enter host and/or credentials)?" 12 72 || abort
+Full details: ${SETUP_LOG}
+
+Try again (re-enter host and/or credentials)?" 14 72 || abort
     ILO_HOST="$(wt --inputbox "iLO IP or hostname (no https://):" 10 64 "${ILO_HOST}")" || abort
     ILO_HOST="${ILO_HOST#https://}"; ILO_HOST="${ILO_HOST%/}"
   done
@@ -1368,6 +1394,7 @@ Inspect: journalctl -u ${SERVICE} -xe" 9 70
 step_finish() {
   local active warn=""
   active="$(systemctl is-active "${SERVICE}" 2>/dev/null || true)"
+  log_setup "=== installation complete: service=${active} ==="
   (( ONCE_RC != 0 )) && warn="NOTE: the single-cycle test returned code ${ONCE_RC}. If you used an EXISTING
 account it may lack 'Configure iLO Settings' (PATCH -> HTTP 403). The service
 is fail-safe but won't quiet until that is fixed.
@@ -1385,7 +1412,9 @@ Useful commands:
   ${SBIN_PATH} --dry-run --once   # evaluate without writing to the iLO
   systemctl restart ${SERVICE}    # apply config edits
 
-Re-run this installer for the management menu (reconfigure / uninstall)." 27 84 || :
+Re-run this installer for the management menu (reconfigure / uninstall).
+
+Install log: ${SETUP_LOG}" 29 84 || :
 }
 
 # --------------------------------------------------------------------------
@@ -1393,6 +1422,7 @@ Re-run this installer for the management menu (reconfigure / uninstall)." 27 84 
 # --------------------------------------------------------------------------
 main() {
   ensure_root_and_tools
+  log_setup "=== HPE Fan Watch installer started (PID=$$) ==="
 
   if is_already_installed; then
     step_already_installed   # only returns on "reconfigure"
