@@ -922,7 +922,8 @@ lightweight reads. Cool-down is auto-scaled to ~2 minutes." 17 78 4 \
   else
     POLL="${choice}"
   fi
-  HYST=$(( (120 + POLL - 1) / POLL )); (( HYST < 3 )) && HYST=3
+  HYST=$(( (120 + POLL - 1) / POLL ))
+  if (( HYST < 3 )); then HYST=3; fi
 }
 
 step_fanvalues() {
@@ -1221,7 +1222,7 @@ evaluate() {
     [[ -n "${reading}" ]] || continue
     reading="${reading%.*}"
     [[ "${reading}" =~ ^[0-9]+$ ]] || continue
-    (( reading > hottest_val )) && { hottest_val="${reading}"; hottest_name="${name}"; }
+    if (( reading > hottest_val )); then hottest_val="${reading}"; hottest_name="${name}"; fi
     w="${SENSOR_WARN[$name]:-70}"; c="${SENSOR_CRIT[$name]:-80}"
     if (( reading >= c )); then worst="safe"
     elif (( reading >= w )) && [[ "${worst}" != "safe" ]]; then worst="normal"; fi
@@ -1436,11 +1437,13 @@ step_finish() {
   local active warn=""
   active="$(systemctl is-active "${SERVICE}" 2>/dev/null || true)"
   log_setup "=== installation complete: service=${active} ==="
-  (( ONCE_RC != 0 )) && warn="NOTE: the single-cycle test returned code ${ONCE_RC}. If you used an EXISTING
+  if (( ONCE_RC != 0 )); then
+    warn="NOTE: the single-cycle test returned code ${ONCE_RC}. If you used an EXISTING
 account it may lack 'Configure iLO Settings' (PATCH -> HTTP 403). The service
 is fail-safe but won't quiet until that is fixed.
 
 "
+  fi
   wt --scrolltext --msgbox \
 "Installation complete (v${VERSION}).   Service status: ${active}
 
