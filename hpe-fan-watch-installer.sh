@@ -14,7 +14,7 @@
 #     (module `redfish`). No raw curl-to-Redfish, no firmware hacks, no AMSD.
 #  2. TLS is ALWAYS verified. `--insecure` is gone. The iLO certificate is
 #     fetched and pinned during install (or a trusted CA path is supplied);
-#     every call verifies against it via the library's `cafile`.
+#     every call verifies against it via the library's `ca_cert_data`.
 #  3. Credentials are never stored in cleartext config. They go to encrypted
 #     systemd credentials (`systemd-creds encrypt`, systemd >= 250) when
 #     available, otherwise a root-only 0400 environment file with a warning.
@@ -216,13 +216,13 @@ ensure_root_and_tools() {
 }
 
 # Install HPE's official Python Redfish library (module: redfish).
-# Check for redfish.redfish_client specifically — the generic 'redfish' PyPI
-# package also provides `import redfish` but lacks redfish_client entirely.
+# Check for redfish.RedfishClient specifically — the generic 'redfish' PyPI
+# package also provides `import redfish` but lacks RedfishClient entirely.
 ensure_redfish_library() {
-  if python3 -c 'import redfish; redfish.redfish_client' >/dev/null 2>&1; then return 0; fi
+  if python3 -c 'import redfish; redfish.RedfishClient' >/dev/null 2>&1; then return 0; fi
   echo "Installing HPE official python-ilorest-library (Redfish) ..." >&2
   # Uninstall the generic 'redfish' PyPI package first if present — it shadows
-  # python-ilorest-library but lacks redfish_client, causing a confusing error.
+  # python-ilorest-library but lacks RedfishClient, causing a confusing error.
   if python3 -c 'import redfish' >/dev/null 2>&1; then
     pip3 uninstall --yes redfish >/dev/null 2>&1 || \
       pip3 uninstall --yes --break-system-packages redfish >/dev/null 2>&1 || true
@@ -234,8 +234,8 @@ ensure_redfish_library() {
     echo "Install it manually (pip3 install python-ilorest-library) and re-run." >&2
     exit 3
   fi
-  python3 -c 'import redfish; redfish.redfish_client' >/dev/null 2>&1 || {
-    echo "ERROR: python-ilorest-library installed but redfish.redfish_client not found." >&2; exit 3; }
+  python3 -c 'import redfish; redfish.RedfishClient' >/dev/null 2>&1 || {
+    echo "ERROR: python-ilorest-library installed but redfish.RedfishClient not found." >&2; exit 3; }
 }
 
 # --------------------------------------------------------------------------
@@ -286,11 +286,13 @@ def main():
 
     client = None
     try:
-        # cafile != None => TLS certificate is verified (never insecure).
-        client = redfish.redfish_client(base_url=base, username=user,
-                                        password=pw, cafile=cacert,
-                                        timeout=timeout, max_retry=2)
-        client.login(auth="session")
+        # ca_cert_data != None => TLS certificate is verified (never insecure).
+        # python-ilorest-library v7+ uses RedfishClient; redfish_client removed.
+        ca_cert_data = {"ca_certs": cacert} if cacert else None
+        client = redfish.RedfishClient(base_url=base, username=user,
+                                       password=pw, ca_cert_data=ca_cert_data,
+                                       timeout=timeout)
+        client.login()
     except Exception as e:
         emit(0, None, "login failed: %s" % e)
         if client is not None:
